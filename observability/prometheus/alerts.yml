@@ -1,0 +1,61 @@
+# Règles d'alerte.
+#
+# Principe : on alerte sur des SYMPTÔMES visibles par l'utilisateur (taux
+# d'erreur, latence, indisponibilité), pas sur des causes (CPU, mémoire).
+# Une alerte qui ne correspond à aucune douleur utilisateur est du bruit, et
+# le bruit tue l'astreinte.
+groups:
+  - name: shopflow-slo
+    interval: 30s
+    rules:
+      - alert: FrontendIndisponible
+        expr: up{job="shopflow-frontend"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          page: 'true'
+        annotations:
+          summary: 'Le frontend ShopFlow ne répond plus'
+          description: 'La cible {{ $labels.instance }} est down depuis 2 minutes.'
+          runbook: 'https://github.com/ORG/shopflow/blob/main/docs/RUNBOOK.md#frontend-indisponible'
+
+      - alert: TauxErreur5xxEleve
+        expr: |
+          sum(rate(nginx_http_requests_total{status=~"5.."}[5m]))
+            / sum(rate(nginx_http_requests_total[5m])) > 0.02
+        for: 5m
+        labels:
+          severity: critical
+          page: 'true'
+        annotations:
+          summary: 'Plus de 2 % de réponses 5xx sur 5 minutes'
+          description: "Budget d'erreur du SLO 99,5 % consommé anormalement vite."
+
+      - alert: BudgetErreurConsommeRapidement
+        # Burn rate rapide : à ce rythme, le budget d'erreur mensuel est épuisé
+        # en moins de 2 jours. Signal d'escalade avant que le SLO ne soit violé.
+        expr: |
+          sum(rate(nginx_http_requests_total{status=~"5.."}[1h]))
+            / sum(rate(nginx_http_requests_total[1h])) > 0.014
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consommation accélérée du budget d'erreur"
+
+      - alert: SondeExterneEnEchec
+        expr: probe_success{job="shopflow-blackbox"} == 0
+        for: 3m
+        labels:
+          severity: critical
+          page: 'true'
+        annotations:
+          summary: 'La sonde externe /healthz échoue'
+
+      - alert: LatenceP95Degradee
+        expr: histogram_quantile(0.95, sum(rate(nginx_http_request_duration_seconds_bucket[5m])) by (le)) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'P95 de latence au-dessus de 1 s'

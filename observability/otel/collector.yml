@@ -1,0 +1,75 @@
+# Collecteur OpenTelemetry.
+#
+# Pourquoi un collecteur plutôt qu'un envoi direct navigateur -> Tempo :
+#  1. le navigateur ne détient aucune credential vers le backend de télémétrie ;
+#  2. l'échantillonnage et la purge de données sensibles se font côté serveur,
+#     donc de façon non contournable ;
+#  3. changer de backend ne nécessite aucun redéploiement du frontend.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - http://localhost:8080
+            - https://shopflow.example.com
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+  memory_limiter:
+    check_interval: 2s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+
+  # Purge : ni jeton ni identifiant ne doivent atterrir dans les traces.
+  attributes/scrub:
+    actions:
+      - key: http.request.header.authorization
+        action: delete
+      - key: http.request.header.cookie
+        action: delete
+      - key: enduser.id
+        action: delete
+
+  # Échantillonnage : 100 % des erreurs et des requêtes lentes, 10 % du reste.
+  # On garde ce qui sert au diagnostic et on divise le coût de stockage par ~8.
+  tail_sampling:
+    decision_wait: 10s
+    policies:
+      - name: erreurs
+        type: status_code
+        status_code: { status_codes: [ERROR] }
+      - name: lentes
+        type: latency
+        latency: { threshold_ms: 1000 }
+      - name: echantillon
+        type: probabilistic
+        probabilistic: { sampling_percentage: 10 }
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/scrub, tail_sampling, batch]
+      exporters: [otlp/tempo]
+  telemetry:
+    logs:
+      level: warn

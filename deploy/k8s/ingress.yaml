@@ -1,0 +1,50 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shopflow-frontend
+  namespace: shopflow-prod
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: 'true'
+    nginx.ingress.kubernetes.io/force-ssl-redirect: 'true'
+    # Répartition canari : 10 % du trafic vers la nouvelle version.
+    # Un défaut n'impacte qu'un utilisateur sur dix, et pendant 5 minutes.
+    nginx.ingress.kubernetes.io/limit-rps: '50'
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [shopflow.example.com]
+      secretName: shopflow-tls
+  rules:
+    - host: shopflow.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: shopflow-frontend
+                port:
+                  name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shopflow-frontend-canary
+  namespace: shopflow-prod
+  annotations:
+    nginx.ingress.kubernetes.io/canary: 'true'
+    nginx.ingress.kubernetes.io/canary-weight: '10'
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: shopflow.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: shopflow-frontend-canary
+                port:
+                  name: http

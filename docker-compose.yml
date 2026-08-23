@@ -1,0 +1,117 @@
+# Stack locale complète : application + chaîne d'observabilité.
+# Objectif pédagogique et opérationnel : un développeur voit ses propres métriques,
+# logs et traces avant que le code n'atteigne la production.
+name: shopflow
+
+services:
+  frontend:
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
+    image: ghcr.io/${GITHUB_REPOSITORY:-local/shopflow}/frontend:${APP_VERSION:-local}
+    environment:
+      APP_API_BASE_URL: https://fakestoreapi.com
+      APP_OTEL_EXPORTER_URL: http://localhost:4318/v1/traces
+      APP_ENVIRONMENT: local
+      APP_VERSION: ${APP_VERSION:-local}
+    ports:
+      - '8080:8080'
+    # Durcissement runtime : ces trois lignes bloquent l'escalade de privilèges
+    # et l'écriture dans le conteneur, y compris après une compromission.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ['CMD', 'wget', '--quiet', '--tries=1', '--spider', 'http://127.0.0.1:8080/healthz']
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '3' }
+    networks: [shopflow]
+
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:1.4.0
+    command: ['--nginx.scrape-uri=http://frontend:8080/nginx_status']
+    depends_on:
+      frontend: { condition: service_healthy }
+    networks: [shopflow]
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    ports: ['9090:9090']
+    networks: [shopflow]
+
+  loki:
+    image: grafana/loki:3.3.2
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./observability/loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    networks: [shopflow]
+
+  promtail:
+    image: grafana/promtail:3.3.2
+    command: -config.file=/etc/promtail/promtail.yml
+    volumes:
+      - ./observability/promtail/promtail.yml:/etc/promtail/promtail.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on: [loki]
+    networks: [shopflow]
+
+  tempo:
+    image: grafana/tempo:2.7.0
+    command: -config.file=/etc/tempo/tempo.yml
+    volumes:
+      - ./observability/otel/tempo.yml:/etc/tempo/tempo.yml:ro
+      - tempo-data:/var/tempo
+    networks: [shopflow]
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.117.0
+    command: ['--config=/etc/otel/collector.yml']
+    volumes:
+      - ./observability/otel/collector.yml:/etc/otel/collector.yml:ro
+    ports:
+      - '4318:4318' # OTLP/HTTP : cible de l'exporteur navigateur
+    depends_on: [tempo]
+    networks: [shopflow]
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?definir GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports: ['3000:3000']
+    depends_on: [prometheus, loki, tempo]
+    networks: [shopflow]
+
+volumes:
+  prometheus-data:
+  loki-data:
+  tempo-data:
+  grafana-data:
+
+networks:
+  shopflow:
+    driver: bridge

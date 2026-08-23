@@ -1,0 +1,3 @@
+# Dockle : bonnes pratiques d'image de conteneur.
+# CIS-DI-0005 : content trust géré par Cosign en CI, pas par DOCKER_CONTENT_TRUST.
+CIS-DI-0005

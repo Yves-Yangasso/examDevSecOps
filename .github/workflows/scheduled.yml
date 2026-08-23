@@ -1,0 +1,112 @@
+name: Sécurité continue
+
+# Une image validée aujourd'hui ne l'est plus demain : une CVE publiée après le
+# build rend vulnérable un artefact déjà en production. Le scan périodique est
+# le seul moyen de détecter cette dérive.
+on:
+  schedule:
+    - cron: '17 3 * * *' # 03h17 UTC, quotidien
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: bao236/examdevsecops
+
+jobs:
+  rescan-production-image:
+    name: Re-scan de l'image en production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Trivy sur l'image publiée
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          format: sarif
+          output: trivy-nightly.sarif
+          severity: HIGH,CRITICAL
+
+      - uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4
+        if: always()
+        with:
+          sarif_file: trivy-nightly.sarif
+          category: trivy-nightly
+
+      - name: Ouverture d'un ticket si nouvelle CVE
+        if: failure()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Nouvelle vulnérabilité HIGH/CRITICAL dans l'image de production`,
+              labels: ['security', 'priority:high'],
+              body: `Le scan quotidien a détecté une vulnérabilité sur \`latest\`.\n\nRun : ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
+
+  expired-exceptions:
+    name: Exceptions de sécurité expirées
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Contrôle des dates d'expiration dans .trivyignore
+        # Une dérogation sans date de fin devient permanente par oubli.
+        # Ce job transforme l'oubli en échec visible.
+        run: |
+          today=$(date -u +%Y-%m-%d)
+          expired=0
+          while IFS= read -r line; do
+            case "$line" in \#*|'') continue;; esac
+            exp=$(printf '%s' "$line" | grep -oE 'expire le [0-9]{4}-[0-9]{2}-[0-9]{2}' | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' || true)
+            if [ -z "$exp" ]; then
+              echo "::error::Exception sans date d'expiration : $line"; expired=1
+            elif [ "$exp" \< "$today" ]; then
+              echo "::error::Exception expirée le $exp : $line"; expired=1
+            fi
+          done < .trivyignore
+          exit $expired
+
+  dora-metrics:
+    name: Métriques DORA
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Calcul de la fréquence de déploiement et du taux d'échec
+        # Mesurer les 4 métriques DORA rend le pipeline lui-même observable.
+        # Sans elles, "on a amélioré la livraison" reste une opinion.
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'cd.yml',
+              created: `>=${new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10)}`,
+              per_page: 100,
+            });
+            const total = runs.length;
+            const failed = runs.filter((r) => r.conclusion === 'failure').length;
+            core.summary
+              .addHeading('Métriques DORA — 30 derniers jours')
+              .addTable([
+                [{ data: 'Métrique', header: true }, { data: 'Valeur', header: true }],
+                ['Fréquence de déploiement', `${(total / 30).toFixed(2)} / jour`],
+                ['Taux d\'échec des changements', total ? `${((failed / total) * 100).toFixed(1)} %` : 'n/a'],
+                ['Déploiements totaux', String(total)],
+              ])
+              .write();

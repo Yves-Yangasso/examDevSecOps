@@ -1,0 +1,44 @@
+# Déploiement d'une image DÉJÀ construite, signée et vérifiée.
+#
+# Ce fichier ne contient volontairement aucune section `build:` : le principe
+# "build once, deploy many" impose que l'artefact déployé soit exactement celui
+# qui a traversé la CI. Reconstruire ici invaliderait la signature Cosign.
+#
+# L'image est référencée par DIGEST (sha256:...) et non par tag : un tag est
+# mutable, un digest ne l'est pas. C'est ce qui empêche qu'une image différente
+# de celle qui a été vérifiée soit démarrée entre la vérification et le run.
+
+services:
+  frontend:
+    image: ${SHOPFLOW_IMAGE:?SHOPFLOW_IMAGE est requis (référence par digest)}
+    container_name: shopflow-${APP_ENVIRONMENT:?APP_ENVIRONMENT est requis}
+    environment:
+      APP_API_BASE_URL: ${APP_API_BASE_URL:-https://fakestoreapi.com}
+      APP_OTEL_EXPORTER_URL: ${APP_OTEL_EXPORTER_URL:-}
+      APP_ENVIRONMENT: ${APP_ENVIRONMENT}
+      APP_VERSION: ${APP_VERSION:-dev}
+    ports:
+      - '127.0.0.1:${HOST_PORT:?HOST_PORT est requis}:8080'
+    # Durcissement identique à celui décrit dans le rapport. Ces trois
+    # directives sont testées : le conteneur ne démarre pas si l'entrypoint
+    # tente d'écrire ailleurs que dans le tmpfs.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'wget', '--quiet', '--tries=1', '--spider', 'http://127.0.0.1:8080/healthz']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    labels:
+      shopflow.environment: ${APP_ENVIRONMENT}
+      shopflow.version: ${APP_VERSION:-dev}
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '3' }

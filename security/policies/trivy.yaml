@@ -1,0 +1,27 @@
+# Politique de scan Trivy (image, filesystem, IaC, secrets).
+severity:
+  - HIGH
+  - CRITICAL
+
+# Un scanner qui échoue sur une base de données de vulnérabilités indisponible
+# doit bloquer, sinon on croit être scanné alors qu'on ne l'est pas.
+exit-code: 1
+ignore-unfixed: false
+
+scan:
+  scanners:
+    - vuln
+    - secret
+    - misconfig
+
+vulnerability:
+  type:
+    - os
+    - library
+
+misconfiguration:
+  include-non-failures: false
+
+# Chaque exception a une date d'expiration : passé ce délai, le pipeline
+# re-échoue et force une revue. Sans expiration, un `.trivyignore` devient
+# un cimetière de vulnérabilités oubliées.

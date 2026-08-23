@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+.env
+.env.*
+!.env.example
+*.local
+.DS_Store
+sbom.cdx.json
+*.sarif
+.vite/
+
+# Runner GitHub Actions self-hosted (installé hors du dépôt, jamais versionné)
+actions-runner*/
+_work/

@@ -1,0 +1,36 @@
+server:
+  http_listen_port: 9080
+  log_level: warn
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 15s
+    relabel_configs:
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: container
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+        target_label: service
+    pipeline_stages:
+      # Les logs nginx et applicatifs sont déjà en JSON : on extrait directement
+      # les champs utiles au lieu d'écrire des regex fragiles.
+      - json:
+          expressions:
+            level: level
+            status: status
+            path: path
+            trace_id: trace_id
+      - labels:
+          level:
+      # Garde-fou : aucun jeton ne doit finir indexé dans Loki, même par accident.
+      - replace:
+          expression: '(Bearer\s+)[A-Za-z0-9._\-]+'
+          replace: '${1}[REDACTED]'

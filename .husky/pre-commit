@@ -1,0 +1,17 @@
+#!/bin/sh
+# Boucle de retour la plus courte du système : quelques secondes, en local.
+# Ce qui est attrapé ici ne consomme ni minute de CI ni attention de reviewer.
+set -e
+
+echo "→ Détection de secrets (gitleaks)"
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks protect --staged --config security/gitleaks/gitleaks.toml --redact
+else
+  echo "  gitleaks absent — contrôle délégué à la CI (bloquant là-bas)."
+fi
+
+echo "→ Lint des fichiers modifiés"
+npx --no-install lint-staged || npm run lint
+
+echo "→ Types"
+npm run typecheck

@@ -1,0 +1,81 @@
+# Micro-segmentation réseau.
+#
+# Par défaut, dans Kubernetes, tout pod peut parler à tout pod. Une compromission
+# du frontend donnerait alors un pivot vers l'ensemble du cluster.
+# Ces politiques appliquent le refus par défaut, puis n'ouvrent que le strict
+# nécessaire.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: shopflow-prod
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: shopflow-frontend
+  namespace: shopflow-prod
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: shopflow-frontend
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Seul l'ingress controller peut joindre le frontend.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Scrape Prometheus.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # Résolution DNS.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Collecteur OTel interne.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 4318
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: shopflow-frontend-canary
+  namespace: shopflow-prod
+spec:
+  podSelector:
+    matchLabels:
+      deployment: canary
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080

@@ -1,0 +1,59 @@
+version: 2
+updates:
+  # Dépendances npm : c'est là que vit le risque supply-chain d'un frontend.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+    open-pull-requests-limit: 10
+    # Délai de décantation avant proposition. Une version publiée depuis
+    # quelques heures peut être une version compromise : plusieurs attaques
+    # supply-chain npm ont été détectées et dépubliées en moins de 24 h.
+    # Attendre, c'est laisser l'écosystème faire une partie de la détection.
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+    groups:
+      # React, son moteur de rendu et leurs typages DOIVENT bouger ensemble.
+      # Sans ce groupe, Dependabot a proposé @types/react-dom@19 en laissant
+      # @types/react@18 : peer dependency insatisfaite, `npm ci` en échec, et
+      # une PR structurellement impossible à fusionner.
+      react:
+        patterns:
+          - react
+          - react-dom
+          - '@types/react'
+          - '@types/react-dom'
+      # Les patchs de dev-dependencies sont regroupés : 1 PR au lieu de 15,
+      # sinon la revue de sécurité se noie dans le bruit et personne ne lit rien.
+      dev-patches:
+        dependency-type: development
+        update-types: [minor, patch]
+      otel:
+        patterns: ['@opentelemetry/*']
+    labels: [dependencies, security]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule: { interval: weekly }
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+    labels: [dependencies, docker]
+
+  # Les actions GitHub sont du code exécuté avec accès au registre et aux
+  # secrets : elles doivent être suivies comme n'importe quelle dépendance.
+  # Elles sont épinglées par SHA dans les workflows ; Dependabot sait mettre
+  # à jour un SHA épinglé et met à jour le commentaire de version avec.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+    groups:
+      actions:
+        patterns: ['*']
+    labels: [dependencies, ci]

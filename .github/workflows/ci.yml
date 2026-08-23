@@ -1,0 +1,415 @@
+name: CI
+
+# Déclencheurs : toute PR et tout push sur main.
+# Le "shift left" n'a de sens que si le retour arrive AVANT la revue humaine.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Permissions minimales par défaut, élargies job par job (moindre privilège).
+permissions:
+  contents: read
+
+concurrency:
+  # Une nouvelle poussée annule le run précédent de la même branche : on ne
+  # paie pas de minutes CI pour valider du code déjà obsolète.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22.23.2'
+  REGISTRY: docker.io
+  IMAGE_NAME: bao236/examdevsecops
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # ÉTAGE 1 — Contrôles rapides (< 3 min). Échouer vite coûte moins cher.
+  # ---------------------------------------------------------------------------
+  quality:
+    name: Qualité (lint, types, format)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Installation déterministe
+        run: npm ci --ignore-scripts
+
+      - name: Lint (ESLint + plugin security)
+        run: npm run lint
+
+      - name: Vérification des types
+        run: npm run typecheck
+
+      - name: Vérification du formatage
+        run: npm run format:check
+
+  secrets-scan:
+    name: Sécurité — secrets (Gitleaks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Historique complet : un secret retiré du HEAD reste compromis s'il
+          # est présent dans un commit antérieur, donc toujours exfiltrable.
+          fetch-depth: 0
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITLEAKS_CONFIG: security/gitleaks/gitleaks.toml
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # ÉTAGE 2 — Tests et analyse. Parallélisés pour tenir le budget de 10 minutes.
+  # ---------------------------------------------------------------------------
+  unit-tests:
+    name: Tests unitaires + couverture
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: quality
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci --ignore-scripts
+
+      - name: Vitest + seuils de couverture
+        run: npm run test:coverage
+
+      - name: Publication du rapport de couverture
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 7
+
+  sast:
+    name: Sécurité — SAST (Semgrep)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: quality
+    permissions:
+      contents: read
+      security-events: write
+    container:
+      image: semgrep/semgrep:1.99.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Analyse statique
+        run: |
+          semgrep scan \
+            --config=security/semgrep/semgrep.yml \
+            --config=p/typescript \
+            --config=p/react \
+            --config=p/owasp-top-ten \
+            --config=p/secrets \
+            --sarif --output=semgrep.sarif \
+            --error \
+            --metrics=off
+
+      - name: Import des résultats dans GitHub Security
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  sca:
+    name: Sécurité — dépendances (SCA)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: quality
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci --ignore-scripts
+
+      # OSV-Scanner interroge la base OSV (Google), plus large que l'avis npm
+      # seul, et corrèle avec le lockfile pour éliminer les faux positifs de
+      # dépendances non atteignables.
+      - name: OSV-Scanner
+        uses: google/osv-scanner-action/osv-scanner-action@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
+        continue-on-error: true
+        with:
+          scan-args: |-
+            --lockfile=package-lock.json
+            --format=sarif
+            --output=osv.sarif
+
+      - name: npm audit (production uniquement)
+        # Les dev-dependencies ne sont pas livrées au navigateur : les traiter
+        # comme bloquantes génère du bruit sans réduire le risque en production.
+        run: npm audit --audit-level=high --omit=dev
+
+      - name: Import SARIF
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4
+        if: always()
+        with:
+          sarif_file: osv.sarif
+          category: osv-scanner
+
+  # ---------------------------------------------------------------------------
+  # ÉTAGE 3 — Construction de l'artefact. Une seule fois, réutilisé partout.
+  # ---------------------------------------------------------------------------
+  build-image:
+    name: Build image + SBOM + scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    needs: [unit-tests, sast, sca, secrets-scan]
+    permissions:
+      contents: read
+      id-token: write # requis pour la signature Cosign keyless (OIDC)
+      security-events: write
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tag: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # QEMU permet de produire l'étage runtime pour arm64 depuis un runner
+      # amd64. Les étages deps/build restent sur la plateforme native
+      # (--platform=$BUILDPLATFORM dans le Dockerfile) : le bundle est du
+      # fichier statique, le recompiler sous émulation ne servirait à rien.
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        if: github.event_name == 'push'
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Métadonnées et étiquettes OCI
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=,format=long
+            type=ref,event=pr
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Connexion au registre
+        if: github.event_name == 'push'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          # Jeton d'accès Docker Hub à portée restreinte (Read & Write), jamais
+          # le mot de passe du compte : un jeton se révoque sans changer les
+          # identifiants, et ne donne pas accès aux paramètres du compte.
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Construction
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          # Sur PR : on construit et on scanne SANS publier. Publier une image
+          # issue d'une PR d'un fork donnerait un vecteur d'empoisonnement du
+          # registre.
+          push: ${{ github.event_name == 'push' }}
+          load: ${{ github.event_name != 'push' }}
+          # Multi-arch uniquement à la publication : le runner de déploiement
+          # est un Mac Apple Silicon (arm64), les runners GitHub sont amd64.
+          # Sur PR, une seule plateforme suffit et `load` l'exige.
+          platforms: ${{ github.event_name == 'push' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true # attestation SLSA de provenance
+          sbom: true
+
+      - name: SBOM CycloneDX (Syft)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ steps.meta.outputs.tags }}
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+          upload-artifact: true
+
+      - name: Scan de vulnérabilités de l'image (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          trivyignores: .trivyignore
+
+      - name: Blocage si vulnérabilité HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: false
+
+      - name: Bonnes pratiques d'image (Dockle)
+        uses: erzz/dockle-action@e8a7c41f36f1236ca3282b298d425ffbfdb2e922 # v1.4.1
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          failure-threshold: fatal
+
+      - name: Scan IaC / configurations (Trivy config)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: sarif
+          output: trivy-config.sarif
+          severity: HIGH,CRITICAL
+
+      - name: Import des SARIF
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4
+        if: always()
+        with:
+          sarif_file: .
+          category: trivy
+
+      # Signature keyless : pas de clé privée à stocker ni à faire tourner.
+      # L'identité du signataire est le workflow GitHub lui-même, attesté par
+      # OIDC et inscrit publiquement dans le journal de transparence Rekor.
+      - name: Installation de Cosign
+        if: github.event_name == 'push'
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Signature de l'image et attestation du SBOM
+        if: github.event_name == 'push'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+          cosign attest --yes \
+            --predicate sbom.cdx.json \
+            --type cyclonedx \
+            "${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+
+  # ---------------------------------------------------------------------------
+  # ÉTAGE 4 — Validation dynamique contre le conteneur RÉEL, pas un dev server.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: Tests E2E (Playwright) sur le conteneur
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: build-image
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci --ignore-scripts
+      - run: npx playwright install --with-deps chromium
+
+      - name: Reconstruction locale de l'image (PR sans publication)
+        env:
+          APP_VERSION: ${{ github.sha }}
+        run: docker build -t shopflow:test --build-arg "APP_VERSION=$APP_VERSION" .
+
+      - name: Démarrage du conteneur
+        env:
+          APP_VERSION: ${{ github.sha }}
+        run: |
+          docker run -d --name shopflow -p 8080:8080 \
+            -e APP_ENVIRONMENT=ci -e "APP_VERSION=$APP_VERSION" \
+            --read-only --tmpfs /tmp --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            shopflow:test
+          timeout 60 sh -c 'until curl -sf http://127.0.0.1:8080/healthz; do sleep 2; done'
+
+      - name: Playwright
+        env:
+          E2E_BASE_URL: http://127.0.0.1:8080
+        run: npm run test:e2e
+
+      - name: Rapport Playwright
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+      - name: Logs du conteneur en cas d'échec
+        if: failure()
+        run: docker logs shopflow
+
+  dast:
+    name: Sécurité — DAST (OWASP ZAP)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: build-image
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Démarrage de l'application
+        run: |
+          docker build -t shopflow:test .
+          docker run -d --name shopflow -p 8080:8080 shopflow:test
+          timeout 60 sh -c 'until curl -sf http://127.0.0.1:8080/healthz; do sleep 2; done'
+
+      # Baseline scan : passif, ~2 minutes, aucun trafic destructif.
+      # Il valide en-têtes, cookies, fuites d'information et CSP sur
+      # l'application telle qu'elle sera servie en production.
+      - name: ZAP Baseline
+        uses: zaproxy/action-baseline@de8ad967d3548d44ef623df22cf95c3b0baf8b25 # v0.15.0
+        with:
+          target: http://127.0.0.1:8080
+          rules_file_name: security/zap/zap-rules.tsv
+          cmd_options: '-a -j'
+          fail_action: true
+          allow_issue_writing: false
+
+  # ---------------------------------------------------------------------------
+  # ÉTAGE 5 — Porte de qualité unique : un seul contrôle requis à protéger.
+  # ---------------------------------------------------------------------------
+  quality-gate:
+    name: Porte de qualité
+    runs-on: ubuntu-24.04
+    needs: [quality, secrets-scan, unit-tests, sast, sca, build-image, e2e, dast]
+    if: always()
+    steps:
+      - name: Vérification de tous les étages
+        # Le JSON passe par l'environnement et non par le script : une sortie
+        # de job contenant une apostrophe s'échapperait des quotes et
+        # exécuterait du shell arbitraire.
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          printf '%s' "$NEEDS_JSON" > results.json
+          if grep -q '"result": *"failure"' results.json || grep -q '"result": *"cancelled"' results.json; then
+            echo "::error::Un ou plusieurs contrôles ont échoué — fusion bloquée."
+            cat results.json
+            exit 1
+          fi
+          echo "Tous les contrôles sont au vert."

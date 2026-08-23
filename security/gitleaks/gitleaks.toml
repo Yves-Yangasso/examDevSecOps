@@ -1,0 +1,36 @@
+# Détection de secrets — exécutée en pre-commit ET en CI sur l'historique complet.
+#
+# Pourquoi les deux : le pre-commit est un confort que le développeur peut
+# contourner (`--no-verify`). Seul le contrôle CI est une vraie barrière.
+title = "ShopFlow - règles de détection de secrets"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "fakestore-jwt"
+description = "Jeton JWT codé en dur"
+regex = '''eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'''
+tags = ["jwt", "credentials"]
+
+[[rules]]
+id = "vite-secret-leak"
+description = "Secret exposé via une variable VITE_ (finit dans le bundle public)"
+regex = '''(?i)VITE_[A-Z0-9_]*(SECRET|PASSWORD|TOKEN|PRIVATE_KEY|API_KEY)\s*=\s*['\"]?[^\s'\"]{8,}'''
+tags = ["frontend", "exposure"]
+
+[allowlist]
+description = "Faux positifs assumés"
+paths = [
+  '''package-lock\.json''',
+  '''\.env\.example''',
+  '''docs/.*\.md''',
+]
+# Identifiants publics de démonstration de la Fake Store API, documentés sur
+# leur site. Aucun accès réel n'est protégé par ces valeurs.
+regexes = [
+  '''mor_2314''',
+  '''83r5\^_''',
+  '''jeton-e2e''',
+  '''jwt-de-test''',
+]

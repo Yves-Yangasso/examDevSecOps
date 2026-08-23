@@ -1,0 +1,7 @@
+# Format : CVE  # justification — expire le AAAA-MM-JJ — responsable
+#
+# Toute ligne ajoutée ici doit être revue en comité sécurité et porter une date
+# d'expiration. Le job `security-debt` (workflow scheduled.yml) échoue sur toute
+# exception dépassée.
+#
+# (aucune exception active à ce jour)

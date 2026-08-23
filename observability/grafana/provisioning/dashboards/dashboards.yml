@@ -1,0 +1,15 @@
+apiVersion: 1
+
+providers:
+  - name: shopflow
+    orgId: 1
+    folder: ShopFlow
+    type: file
+    disableDeletion: false
+    # Les dashboards sont versionnés dans Git : une modification faite à la main
+    # dans l'UI est écrasée. L'observabilité est du code, pas de la config
+    # cliquée que personne ne sait reproduire après un incident.
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

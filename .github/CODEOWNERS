@@ -1,0 +1,10 @@
+# Revue obligatoire sur les chemins sensibles.
+# Une modification de pipeline ou de politique de sécurité ne doit jamais
+# passer avec la seule approbation de son auteur.
+*                        @shopflow/dev
+/.github/workflows/      @shopflow/platform @shopflow/security
+/security/               @shopflow/security
+/docker/                 @shopflow/platform @shopflow/security
+/deploy/                 @shopflow/platform
+/observability/          @shopflow/platform
+Dockerfile                @shopflow/platform @shopflow/security

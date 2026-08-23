@@ -1,0 +1,193 @@
+name: CD
+
+# Le déploiement n'est déclenché que par une CI verte sur main.
+# Aucun chemin ne permet de déployer un artefact qui n'a pas traversé la chaîne
+# complète de tests et de scans.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Tag d'image à déployer (SHA long)"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: bao236/examdevsecops
+  # Plage 1808x : les ports 8080/8081 sont déjà utilisés par d'autres projets
+  # sur la machine hôte. Un runner self-hosted partage la machine avec le reste
+  # de son environnement — un déploiement ne doit jamais entrer en collision.
+  STAGING_PORT: '18081'
+  CANARY_PORT: '18082'
+  PRODUCTION_PORT: '18080'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Garde d'admission. Tourne sur le runner LOCAL : on vérifie la signature sur
+  # la machine même qui exécutera l'image, et on résout le tag en DIGEST.
+  # Déployer ensuite par digest ferme la fenêtre entre « ce qui a été vérifié »
+  # et « ce qui est démarré » — un tag peut être réécrit entre les deux.
+  # ---------------------------------------------------------------------------
+  verify-artifact:
+    name: Vérification de la signature
+    # GARDE-FOU CRITIQUE — le dépôt est public et le runner tourne sur une
+    # machine personnelle. Un runner self-hosted exposé à des PR de forks
+    # permettrait à n'importe qui d'exécuter du code arbitraire sur cette
+    # machine. Trois verrous cumulés :
+    #   1. Ce workflow n'écoute PAS `pull_request`, seulement `workflow_run`
+    #      sur main (branche protégée) et `workflow_dispatch` (droit d'écriture).
+    #   2. La condition ci-dessous refuse tout déclenchement dont le dépôt
+    #      source n'est pas ce dépôt — donc tout fork.
+    #   3. L'environnement `production` exige une validation humaine.
+    if: >-
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: [self-hosted, shopflow-local]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      image: ${{ steps.resolve.outputs.image }}
+    steps:
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Connexion au registre
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: echo "$DOCKERHUB_TOKEN" | docker login docker.io -u "$DOCKERHUB_USERNAME" --password-stdin
+
+      - name: Résolution du tag puis du digest
+        id: resolve
+        # Les valeurs issues du contexte passent par `env:` et jamais par une
+        # interpolation directe dans le script : `${{ }}` est substitué AVANT
+        # l'exécution du shell, ce qui permettrait une injection de commande
+        # via un nom de branche ou une saisie d'utilisateur.
+        env:
+          INPUT_TAG: ${{ inputs.image_tag }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          TAG="${INPUT_TAG:-$RUN_SHA}"
+          REF="${REGISTRY}/${IMAGE_NAME}:${TAG}"
+          docker pull --quiet "$REF"
+          DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "$REF")"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "image=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Image résolue : $DIGEST"
+
+      - name: Vérification Cosign (identité OIDC du workflow de build)
+        env:
+          IMAGE: ${{ steps.resolve.outputs.image }}
+          REPO: ${{ github.repository }}
+        run: |
+          cosign verify \
+            --certificate-identity-regexp "^https://github.com/${REPO}/.github/workflows/ci.yml@refs/heads/main$" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$IMAGE"
+
+  # ---------------------------------------------------------------------------
+  # Staging — déploiement automatique sur le Docker local, port 8081.
+  # ---------------------------------------------------------------------------
+  deploy-staging:
+    name: Déploiement staging
+    needs: verify-artifact
+    runs-on: [self-hosted, shopflow-local]
+    timeout-minutes: 20
+    environment:
+      name: staging
+      url: http://localhost:18081
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Déploiement
+        env:
+          IMAGE: ${{ needs.verify-artifact.outputs.image }}
+          VERSION: ${{ needs.verify-artifact.outputs.tag }}
+          APP_OTEL_EXPORTER_URL: http://127.0.0.1:4318/v1/traces
+        run: ./scripts/deploy-local.sh staging "$IMAGE" "$STAGING_PORT" "$VERSION"
+
+      - name: Tests de fumée
+        run: |
+          curl -sf "http://127.0.0.1:${STAGING_PORT}/healthz" > /dev/null
+          curl -sf "http://127.0.0.1:${STAGING_PORT}/" | grep -q '<div id="root">'
+          # Les en-têtes de sécurité sont revérifiés sur l'instance déployée :
+          # c'est exactement le défaut qui avait échappé au développement.
+          HEADERS="$(curl -sI "http://127.0.0.1:${STAGING_PORT}/")"
+          for H in content-security-policy x-frame-options x-content-type-options referrer-policy; do
+            echo "$HEADERS" | grep -qi "^$H:" || { echo "::error::En-tête $H absent."; exit 1; }
+          done
+          echo "Staging opérationnel avec ses en-têtes de sécurité."
+
+      - name: Retour arrière si le smoke échoue
+        if: failure()
+        run: ./scripts/rollback-local.sh staging "$STAGING_PORT"
+
+  # ---------------------------------------------------------------------------
+  # Production — canari sur 8082, mesuré, puis promotion sur 8080.
+  # La protection d'environnement GitHub impose une validation humaine.
+  # ---------------------------------------------------------------------------
+  deploy-production:
+    name: Déploiement production
+    needs: [verify-artifact, deploy-staging]
+    runs-on: [self-hosted, shopflow-local]
+    timeout-minutes: 30
+    environment:
+      # Cet environnement porte la règle "required reviewers" côté GitHub :
+      # le job reste en attente tant qu'un approbateur n'a pas validé.
+      # Le contrôle du déploiement est une décision humaine tracée.
+      name: production
+      url: http://localhost:18080
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Démarrage du canari
+        env:
+          IMAGE: ${{ needs.verify-artifact.outputs.image }}
+          VERSION: ${{ needs.verify-artifact.outputs.tag }}
+          APP_OTEL_EXPORTER_URL: http://127.0.0.1:4318/v1/traces
+        run: ./scripts/deploy-local.sh canary "$IMAGE" "$CANARY_PORT" "$VERSION"
+
+      - name: Observation du canari
+        run: ./scripts/canary-check.sh "http://127.0.0.1:${CANARY_PORT}" 0.02 60
+
+      - name: Promotion à 100 %
+        env:
+          IMAGE: ${{ needs.verify-artifact.outputs.image }}
+          VERSION: ${{ needs.verify-artifact.outputs.tag }}
+          APP_OTEL_EXPORTER_URL: http://127.0.0.1:4318/v1/traces
+        run: ./scripts/deploy-local.sh production "$IMAGE" "$PRODUCTION_PORT" "$VERSION"
+
+      - name: Arrêt du canari
+        if: always()
+        run: docker compose -p shopflow-canary -f deploy/compose/docker-compose.deploy.yml down || true
+
+      - name: Retour arrière automatique en cas d'échec
+        if: failure()
+        run: ./scripts/rollback-local.sh production "$PRODUCTION_PORT"
+
+      - name: Marqueur de déploiement pour Grafana
+        if: always()
+        # Sans marqueur, personne ne relie un pic d'erreurs à un déploiement.
+        # C'est la question la plus utile en incident : "qu'est-ce qui a changé ?"
+        env:
+          GRAFANA_URL: ${{ secrets.GRAFANA_URL }}
+          GRAFANA_TOKEN: ${{ secrets.GRAFANA_TOKEN }}
+          TAG: ${{ needs.verify-artifact.outputs.tag }}
+          STATUS: ${{ job.status }}
+        run: |
+          [ -n "${GRAFANA_URL:-}" ] || { echo "Grafana non configuré — marqueur ignoré."; exit 0; }
+          BODY="$(python3 -c 'import json,os; print(json.dumps({"tags":["deploy","production"],"text":"Deploiement %s - statut %s" % (os.environ["TAG"], os.environ["STATUS"])}))')"
+          curl -sf -X POST "$GRAFANA_URL/api/annotations" \
+            -H "Authorization: Bearer $GRAFANA_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d "$BODY" > /dev/null || echo "::warning::Marqueur Grafana non posé."

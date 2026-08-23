@@ -1,0 +1,155 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shopflow-frontend
+  namespace: shopflow-prod
+  labels:
+    app.kubernetes.io/name: shopflow-frontend
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # maxUnavailable: 0 garantit qu'aucune capacité n'est retirée avant que
+      # les nouvelles instances ne soient prêtes : déploiement sans coupure.
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: shopflow-frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: shopflow-frontend
+        deployment: stable
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/port: '8080'
+        prometheus.io/path: /nginx_status
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: frontend
+          # Remplacé par `kubectl set image` avec un digest immuable en CD.
+          image: docker.io/bao236/examdevsecops:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: APP_ENVIRONMENT
+              value: production
+            - name: APP_API_BASE_URL
+              value: https://fakestoreapi.com
+            - name: APP_OTEL_EXPORTER_URL
+              value: https://otel.shopflow.example.com/v1/traces
+            - name: APP_VERSION
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['app.kubernetes.io/version']
+          # Durcissement : ces contraintes sont vérifiées par Trivy config en CI
+          # et refusées à l'admission par la Pod Security Standard "restricted".
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+          resources:
+            # Requests = ce qui est réservé ; limits = plafond.
+            # Sans limits, un conteneur qui fuit peut évincer ses voisins.
+            requests:
+              cpu: 50m
+              memory: 48Mi
+            limits:
+              cpu: 300m
+              memory: 128Mi
+          # startupProbe protège les démarrages lents ; liveness ne se déclenche
+          # qu'ensuite, ce qui évite les boucles de redémarrage au boot.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            failureThreshold: 12
+            periodSeconds: 5
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: nginx-cache
+          emptyDir: {}
+      topologySpreadConstraints:
+        # Répartit les répliques entre nœuds : la perte d'un nœud ne doit pas
+        # emporter tout le service.
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: shopflow-frontend
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shopflow-frontend
+  namespace: shopflow-prod
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: shopflow-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: shopflow-frontend
+  namespace: shopflow-prod
+spec:
+  # Empêche une opération de maintenance (drain de nœud) de descendre le
+  # service sous 2 répliques.
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: shopflow-frontend
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: shopflow-frontend
+  namespace: shopflow-prod
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: shopflow-frontend
+  minReplicas: 3
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

@@ -1,0 +1,65 @@
+# Règles SAST maison, en complément des rulesets communautaires
+# (p/typescript, p/react, p/owasp-top-ten, p/secrets) lancés en CI.
+#
+# Ces règles encodent des décisions d'architecture propres au projet : un
+# linter générique ne peut pas savoir que le jeton doit rester en mémoire.
+rules:
+  - id: no-token-in-web-storage
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      Ne jamais persister un jeton d'authentification dans localStorage ou
+      sessionStorage : un seul XSS suffit à l'exfiltrer durablement.
+      Utiliser le module src/api/tokenStore.ts (stockage mémoire).
+    patterns:
+      - pattern-either:
+          - pattern: localStorage.setItem($K, $V)
+          - pattern: sessionStorage.setItem($K, $V)
+      - metavariable-regex:
+          metavariable: $K
+          regex: '(?i).*(token|jwt|auth|credential|password|secret).*'
+
+  - id: no-dangerously-set-inner-html
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      dangerouslySetInnerHTML injecte du HTML non échappé (XSS). Passer par du
+      texte React, ou sanitiser explicitement avec justification écrite.
+    pattern: dangerouslySetInnerHTML={...}
+
+  - id: no-hardcoded-api-url
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: >-
+      URL d'API codée en dur hors de src/api/config.ts. Passer par getConfig()
+      pour préserver le principe "build once, deploy many".
+    patterns:
+      - pattern-regex: 'https?://(?!localhost|127\.0\.0\.1)[a-z0-9.-]+\.[a-z]{2,}'
+      - pattern-not-inside: |
+          // eslint-disable-next-line
+          ...
+    paths:
+      include: ['src/**']
+      exclude: ['src/api/config.ts']
+
+  - id: no-eval-like
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: 'eval / new Function exécutent du code arbitraire : interdits.'
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: new Function(...)
+
+  - id: fetch-without-timeout
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: >-
+      Appel fetch direct sans timeout : une API tierce lente fige l'interface.
+      Utiliser le helper request() de src/api/client.ts.
+    patterns:
+      - pattern: fetch($URL, ...)
+      - pattern-not-inside: |
+          export async function request(...) { ... }
+    paths:
+      include: ['src/**']
+      exclude: ['src/api/client.ts']

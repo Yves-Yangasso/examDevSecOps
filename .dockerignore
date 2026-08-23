@@ -1,0 +1,15 @@
+node_modules
+dist
+coverage
+playwright-report
+test-results
+.git
+.github
+docs
+observability
+deploy
+tests/e2e
+*.md
+.env
+.env.*
+Dockerfile*
