@@ -129,6 +129,13 @@ jobs:
       - name: Import des résultats dans GitHub Security
         uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4
         if: always()
+        # L'import SARIF est du REPORTING, pas un contrôle. Le gate reste le
+        # code de sortie du scanner (`semgrep --error`, `npm audit`, Trivy
+        # `exit-code: 1`), qui lui est bloquant. Faire échouer tout le pipeline
+        # parce qu'une intégration de restitution est indisponible apprend aux
+        # équipes à ignorer le rouge — c'est l'inverse du but recherché.
+        # Nécessite « Code scanning » activé dans les réglages du dépôt.
+        continue-on-error: true
         with:
           sarif_file: semgrep.sarif
           category: semgrep
@@ -174,6 +181,13 @@ jobs:
       - name: Import SARIF
         uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4
         if: always()
+        # L'import SARIF est du REPORTING, pas un contrôle. Le gate reste le
+        # code de sortie du scanner (`semgrep --error`, `npm audit`, Trivy
+        # `exit-code: 1`), qui lui est bloquant. Faire échouer tout le pipeline
+        # parce qu'une intégration de restitution est indisponible apprend aux
+        # équipes à ignorer le rouge — c'est l'inverse du but recherché.
+        # Nécessite « Code scanning » activé dans les réglages du dépôt.
+        continue-on-error: true
         with:
           sarif_file: osv.sarif
           category: osv-scanner
@@ -300,6 +314,13 @@ jobs:
       - name: Import des SARIF
         uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4
         if: always()
+        # L'import SARIF est du REPORTING, pas un contrôle. Le gate reste le
+        # code de sortie du scanner (`semgrep --error`, `npm audit`, Trivy
+        # `exit-code: 1`), qui lui est bloquant. Faire échouer tout le pipeline
+        # parce qu'une intégration de restitution est indisponible apprend aux
+        # équipes à ignorer le rouge — c'est l'inverse du but recherché.
+        # Nécessite « Code scanning » activé dans les réglages du dépôt.
+        continue-on-error: true
         with:
           sarif_file: .
           category: trivy
