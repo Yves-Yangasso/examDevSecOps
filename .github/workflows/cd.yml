@@ -59,6 +59,17 @@ jobs:
       tag: ${{ steps.resolve.outputs.tag }}
       image: ${{ steps.resolve.outputs.image }}
     steps:
+      # Le runner tourne en service launchd, sans session graphique ouverte.
+      # Le credential helper de Docker Desktop ne peut alors pas atteindre le
+      # trousseau macOS ("User interaction is not allowed", -25308) et toute
+      # commande docker touchant au registre échoue. On isole la configuration
+      # Docker dans le répertoire temporaire du job : aucun appel au trousseau,
+      # et les identifiants disparaissent avec le job.
+      - name: Configuration Docker isolée du trousseau macOS
+        run: |
+          mkdir -p "$RUNNER_TEMP/docker"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
+
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Connexion au registre
@@ -107,6 +118,17 @@ jobs:
       name: staging
       url: http://localhost:18081
     steps:
+      # Le runner tourne en service launchd, sans session graphique ouverte.
+      # Le credential helper de Docker Desktop ne peut alors pas atteindre le
+      # trousseau macOS ("User interaction is not allowed", -25308) et toute
+      # commande docker touchant au registre échoue. On isole la configuration
+      # Docker dans le répertoire temporaire du job : aucun appel au trousseau,
+      # et les identifiants disparaissent avec le job.
+      - name: Configuration Docker isolée du trousseau macOS
+        run: |
+          mkdir -p "$RUNNER_TEMP/docker"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Déploiement
@@ -148,6 +170,17 @@ jobs:
       name: production
       url: http://localhost:18080
     steps:
+      # Le runner tourne en service launchd, sans session graphique ouverte.
+      # Le credential helper de Docker Desktop ne peut alors pas atteindre le
+      # trousseau macOS ("User interaction is not allowed", -25308) et toute
+      # commande docker touchant au registre échoue. On isole la configuration
+      # Docker dans le répertoire temporaire du job : aucun appel au trousseau,
+      # et les identifiants disparaissent avec le job.
+      - name: Configuration Docker isolée du trousseau macOS
+        run: |
+          mkdir -p "$RUNNER_TEMP/docker"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Démarrage du canari
