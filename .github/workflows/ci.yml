@@ -290,6 +290,11 @@ jobs:
             REF="${REGISTRY}/${IMAGE_NAME}:${VERSION}"
           fi
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          # Dockle ne sait pas résoudre un index OCI multi-plateforme : il exige
+          # un manifeste de plateforme unique et refuse un digest d'index avec
+          # « Manifest does not match provided manifest digest ». Le tag, lui,
+          # se résout normalement vers la plateforme du runner.
+          echo "tag_ref=${REGISTRY}/${IMAGE_NAME}:${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Référence analysée : $REF"
 
       - name: SBOM CycloneDX (Syft)
@@ -322,8 +327,15 @@ jobs:
       - name: Bonnes pratiques d'image (Dockle)
         uses: erzz/dockle-action@e8a7c41f36f1236ca3282b298d425ffbfdb2e922 # v1.4.1
         with:
-          image: ${{ steps.ref.outputs.ref }}
+          image: ${{ steps.ref.outputs.tag_ref }}
           failure-threshold: fatal
+          # CIS-DI-0010 se déclenche sur KEY_SHA512, présent dans une couche de
+          # l'image de base nginx-unprivileged. Ce n'est pas un secret : c'est
+          # l'empreinte SHA512 de la clé PUBLIQUE de signature des paquets
+          # nginx, utilisée pour vérifier son authenticité au build.
+          # On accepte cette clé nommément plutôt que de désactiver la règle :
+          # CIS-DI-0010 doit continuer à détecter un vrai secret chez nous.
+          accept-keys: KEY_SHA512
 
       - name: Scan IaC / configurations (Trivy config)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
