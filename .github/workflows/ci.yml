@@ -269,10 +269,33 @@ jobs:
           provenance: true # attestation SLSA de provenance
           sbom: true
 
+      # `steps.meta.outputs.tags` est MULTI-LIGNE (sha long + latest). Le passer
+      # à un outil qui attend une référence unique lui fait recevoir les deux
+      # concaténées par un saut de ligne — c'est exactement ce qui faisait
+      # échouer Syft. On calcule ici une référence unique et sans ambiguïté,
+      # utilisée par tous les outils en aval.
+      #
+      # Sur push : le DIGEST, qui est l'identité réelle de l'artefact publié.
+      # Sur PR : le tag, seule référence disponible puisque rien n'est publié.
+      - name: Référence unique de l'image
+        id: ref
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          IS_PUSH: ${{ github.event_name == 'push' }}
+        run: |
+          if [ "$IS_PUSH" = "true" ]; then
+            REF="${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+          else
+            REF="${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+          fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "Référence analysée : $REF"
+
       - name: SBOM CycloneDX (Syft)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
-          image: ${{ steps.meta.outputs.tags }}
+          image: ${{ steps.ref.outputs.ref }}
           format: cyclonedx-json
           output-file: sbom.cdx.json
           upload-artifact: true
@@ -280,7 +303,7 @@ jobs:
       - name: Scan de vulnérabilités de l'image (Trivy)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          image-ref: ${{ steps.ref.outputs.ref }}
           format: sarif
           output: trivy-image.sarif
           severity: HIGH,CRITICAL
@@ -290,7 +313,7 @@ jobs:
       - name: Blocage si vulnérabilité HIGH/CRITICAL
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          image-ref: ${{ steps.ref.outputs.ref }}
           format: table
           severity: HIGH,CRITICAL
           exit-code: '1'
@@ -299,7 +322,7 @@ jobs:
       - name: Bonnes pratiques d'image (Dockle)
         uses: erzz/dockle-action@e8a7c41f36f1236ca3282b298d425ffbfdb2e922 # v1.4.1
         with:
-          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          image: ${{ steps.ref.outputs.ref }}
           failure-threshold: fatal
 
       - name: Scan IaC / configurations (Trivy config)
