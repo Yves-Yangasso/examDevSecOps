@@ -281,20 +281,25 @@ jobs:
         id: ref
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
-          VERSION: ${{ steps.meta.outputs.version }}
+          TAGS: ${{ steps.meta.outputs.tags }}
           IS_PUSH: ${{ github.event_name == 'push' }}
         run: |
+          # Première ligne de `tags` = le tag SHA long, déclaré en premier dans
+          # metadata-action. On ne prend surtout pas `outputs.version`, qui vaut
+          # `latest` sur la branche par défaut : analyser un tag mutable ne dit
+          # rien de l'artefact réellement construit par CE run.
+          TAG_REF="$(printf '%s\n' "$TAGS" | head -n1)"
           if [ "$IS_PUSH" = "true" ]; then
             REF="${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
           else
-            REF="${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+            REF="$TAG_REF"
           fi
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
           # Dockle ne sait pas résoudre un index OCI multi-plateforme : il exige
           # un manifeste de plateforme unique et refuse un digest d'index avec
           # « Manifest does not match provided manifest digest ». Le tag, lui,
           # se résout normalement vers la plateforme du runner.
-          echo "tag_ref=${REGISTRY}/${IMAGE_NAME}:${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag_ref=$TAG_REF" >> "$GITHUB_OUTPUT"
           echo "Référence analysée : $REF"
 
       - name: SBOM CycloneDX (Syft)
@@ -335,7 +340,7 @@ jobs:
           # nginx, utilisée pour vérifier son authenticité au build.
           # On accepte cette clé nommément plutôt que de désactiver la règle :
           # CIS-DI-0010 doit continuer à détecter un vrai secret chez nous.
-          accept-keys: KEY_SHA512
+          accept-keywords: KEY_SHA512
 
       - name: Scan IaC / configurations (Trivy config)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
