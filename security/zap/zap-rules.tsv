@@ -5,6 +5,7 @@
 # explicitement chaque exception, avec sa raison. Une exception non justifiée
 # est une dette de sécurité invisible.
 10015	IGNORE	# Cache-Control manquant sur les assets immuables : voulu (max-age=31536000)
+10049	IGNORE	# Politique de cache explicite : no-store sur /config.js, immutable sur /assets, no-cache sur index.html. Aucune réponse ne porte de donnée utilisateur.
 10063	IGNORE	# Permissions-Policy signalée incomplète : notre liste couvre le nécessaire
 10096	IGNORE	# Timestamp dans les noms de fichiers générés par Vite : non sensible
 10109	IGNORE	# Modern Web Application : détection informative, pas une vulnérabilité

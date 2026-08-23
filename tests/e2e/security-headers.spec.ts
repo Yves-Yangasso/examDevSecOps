@@ -22,6 +22,11 @@ test.describe('En-têtes de sécurité HTTP', () => {
     expect(headers['x-frame-options']).toBe('DENY');
     expect(headers['referrer-policy']).toBe('strict-origin-when-cross-origin');
     expect(headers['permissions-policy']).toContain('camera=()');
+    // COEP `credentialless` : isole la page sans exiger un en-tête CORP des
+    // images de l'API tierce (`require-corp` les ferait toutes disparaître).
+    expect(headers['cross-origin-embedder-policy']).toBe('credentialless');
+    // Aucune source inline tolérée : la CSP ne vaut que si elle reste stricte.
+    expect(headers['content-security-policy']).not.toContain("'unsafe-inline'");
     // La bannière serveur ne doit pas divulguer la version de nginx.
     expect(headers['server'] ?? '').not.toMatch(/\d+\.\d+\.\d+/);
   });

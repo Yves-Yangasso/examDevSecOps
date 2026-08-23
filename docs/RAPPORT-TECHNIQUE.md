@@ -385,19 +385,16 @@ faute de quoi les assertions de sécurité passaient sur du vide et donnaient un
 2. **`ProtectedRoute` n'est pas un contrôle de sécurité.** Tout code livré au
    navigateur est sous le contrôle de l'utilisateur. L'autorisation appartient à
    l'API — c'est documenté dans le code pour empêcher une fausse confiance.
-3. **La CSP contient `style-src 'unsafe-inline'`**, requis par les styles
-   injectés par React. *Correction cible : nonces générés par requête, ce qui
-   suppose un serveur non purement statique.*
-4. **Aucune protection anti-bot sur le formulaire de connexion.** La limitation
+3. **Aucune protection anti-bot sur le formulaire de connexion.** La limitation
    de débit nginx est par IP, contournable via un pool d'adresses. Une vraie
    défense (rate limit par compte, second facteur) relève du backend.
-5. **Le déploiement en production est décrit mais non exécuté** : le sujet ne
+4. **Le déploiement en production est décrit mais non exécuté** : le sujet ne
    fournit pas de cluster. Les manifestes et le workflow sont complets et
    cohérents, mais n'ont pas tourné contre un vrai `kubectl`. Tout ce qui
    pouvait être vérifié localement l'a été (§9).
-6. **DAST limité au *baseline* scan.** Le scan actif de ZAP est destructif et
+5. **DAST limité au *baseline* scan.** Le scan actif de ZAP est destructif et
    inadapté à une PR. Il devrait tourner de nuit contre staging.
-7. **Un seul environnement d'observabilité** (Compose local). En production,
+6. **Un seul environnement d'observabilité** (Compose local). En production,
    Loki et Tempo demanderaient un stockage objet et un mode distribué.
 
 ### Améliorations futures, par ordre de rapport valeur/coût
