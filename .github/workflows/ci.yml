@@ -105,6 +105,10 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      # `actions: read` est exigé par codeql-action/upload-sarif v4 pour lire
+      # les métadonnées du run. La v3 ne le demandait pas : sans cette ligne,
+      # le scan réussit mais l'import échoue en "Resource not accessible".
+      actions: read
     container:
       image: semgrep/semgrep:1.99.0
     steps:
@@ -137,6 +141,10 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      # `actions: read` est exigé par codeql-action/upload-sarif v4 pour lire
+      # les métadonnées du run. La v3 ne le demandait pas : sans cette ligne,
+      # le scan réussit mais l'import échoue en "Resource not accessible".
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -182,6 +190,10 @@ jobs:
       contents: read
       id-token: write # requis pour la signature Cosign keyless (OIDC)
       security-events: write
+      # `actions: read` est exigé par codeql-action/upload-sarif v4 pour lire
+      # les métadonnées du run. La v3 ne le demandait pas : sans cette ligne,
+      # le scan réussit mais l'import échoue en "Resource not accessible".
+      actions: read
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
       image-tag: ${{ steps.meta.outputs.version }}

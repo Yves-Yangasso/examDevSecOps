@@ -23,6 +23,10 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      # `actions: read` est exigé par codeql-action/upload-sarif v4 pour lire
+      # les métadonnées du run. La v3 ne le demandait pas : sans cette ligne,
+      # le scan réussit mais l'import échoue en "Resource not accessible".
+      actions: read
       issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
