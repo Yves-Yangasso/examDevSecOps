@@ -10,7 +10,7 @@
 # Dependabot met ces digests à jour par PR, donc la mise à jour reste tracée.
 ###############################################################################
 ARG NODE_IMAGE=node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
-ARG NGINX_IMAGE=nginxinc/nginx-unprivileged:1.31-alpine@sha256:f972e5322b9797dc2a6b830030094426437b1ae7032e4644496395336ac6fdac
+ARG NGINX_IMAGE=nginxinc/nginx-unprivileged:1.31-alpine@sha256:901e944d1f4fc2bd077e8f5568b98c1f6f8cdacf6b97a87747c43134a339b9a7
 
 ###############################################################################
 # Étage 1 — dépendances
@@ -69,6 +69,20 @@ LABEL org.opencontainers.image.title="shopflow-frontend" \
       org.opencontainers.image.licenses="MIT"
 
 USER root
+
+# Correctifs de sécurité de la distribution appliqués au build.
+#
+# Épingler l'image de base par digest garantit la reproductibilité, mais l'amont
+# ne republie pas son image à chaque correctif Alpine : le 2026-08-27, l'image
+# livre encore openssl 3.5.7-r0 alors que 3.5.8-r0, qui corrige CVE-2026-14456
+# (HIGH), est disponible dans le dépôt v3.24. Sans cette étape, la porte
+# HIGH/CRITICAL de la CI bloque un correctif que rien n'empêche d'appliquer.
+#
+# On corrige plutôt que de déroger : `.trivyignore` est réservé aux CVE SANS
+# correctif disponible. Les paquets sont nommés explicitement — un `apk upgrade`
+# global changerait silencieusement des composants non liés au correctif visé.
+RUN apk upgrade --no-cache libcrypto3 libssl3
+
 RUN rm -f /etc/nginx/conf.d/default.conf
 COPY docker/nginx.conf /etc/nginx/nginx.conf
 COPY docker/default.conf /etc/nginx/conf.d/default.conf
