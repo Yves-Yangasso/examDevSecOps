@@ -57,7 +57,13 @@ jobs:
       id-token: write
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
-      image: ${{ steps.resolve.outputs.image }}
+      # On expose le DIGEST NU (`sha256:...`) et non la référence complète.
+      # `IMAGE_NAME` commence par le nom d'utilisateur Docker Hub, qui est un
+      # secret : le runner refuse de transmettre une sortie de job contenant une
+      # valeur masquée (« Skip output 'image' since it may contain secret ») et
+      # la remplace silencieusement par une chaîne vide. Les jobs consommateurs
+      # reconstruisent `$REGISTRY/$IMAGE_NAME@$DIGEST` depuis `env`.
+      digest: ${{ steps.resolve.outputs.digest }}
     steps:
       # Le runner tourne en service launchd, sans session graphique ouverte :
       # le trousseau macOS refuse tout accès non interactif ("User interaction
@@ -72,12 +78,44 @@ jobs:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
+          # Le point de terminaison du démon est résolu AVANT de basculer sur la
+          # configuration isolée : `currentContext` (ici `desktop-linux`) vit dans
+          # ~/.docker/config.json. Une configuration neuve ne le contient pas, le
+          # CLI retombe donc sur le contexte `default` — unix:///var/run/docker.sock,
+          # socket que Docker Desktop ne crée que si l'option « default Docker
+          # socket » est active. D'où le « Cannot connect to the Docker daemon ».
+          # On fige explicitement DOCKER_HOST : l'isolation des identifiants ne
+          # doit pas emporter avec elle l'adresse du démon.
+          DOCKER_ENDPOINT="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2> /dev/null || true)"
+          if [ -z "$DOCKER_ENDPOINT" ]; then
+            for SOCK in "$HOME/.docker/run/docker.sock" /var/run/docker.sock; do
+              if [ -S "$SOCK" ]; then DOCKER_ENDPOINT="unix://$SOCK"; break; fi
+            done
+          fi
+          [ -n "$DOCKER_ENDPOINT" ] || { echo "::error::Démon Docker introuvable sur le runner."; exit 1; }
+          echo "DOCKER_HOST=$DOCKER_ENDPOINT" >> "$GITHUB_ENV"
+
           mkdir -p "$RUNNER_TEMP/docker"
           echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
           AUTH="$(printf '%s:%s' "$DOCKERHUB_USERNAME" "$DOCKERHUB_TOKEN" | base64 | tr -d '\n')"
           umask 077
-          printf '{"auths":{"https://index.docker.io/v1/":{"auth":"%s"}}}\n' "$AUTH" \
-            > "$RUNNER_TEMP/docker/config.json"
+          # `docker compose` est un PLUGIN CLI, cherché dans
+          # $DOCKER_CONFIG/cli-plugins avant les emplacements système. Une
+          # configuration neuve ne voit donc plus ~/.docker/cli-plugins et
+          # `docker compose` disparaît (« unknown command »). `cliPluginsExtraDirs`
+          # rend les plugins de la machine visibles sans réintroduire le trousseau.
+          printf '{"auths":{"https://index.docker.io/v1/":{"auth":"%s"}},"cliPluginsExtraDirs":["%s"]}\n' \
+            "$AUTH" "$HOME/.docker/cli-plugins" > "$RUNNER_TEMP/docker/config.json"
+
+          # Échouer ici, avec un message clair, plutôt que trois étapes plus loin
+          # sur un `docker pull` dont l'erreur ne dit pas d'où vient le problème.
+          DOCKER_CONFIG="$RUNNER_TEMP/docker" DOCKER_HOST="$DOCKER_ENDPOINT" \
+            docker version --format '{{.Server.Version}}' > /dev/null \
+            || { echo "::error::Démon Docker injoignable sur $DOCKER_ENDPOINT."; exit 1; }
+          DOCKER_CONFIG="$RUNNER_TEMP/docker" DOCKER_HOST="$DOCKER_ENDPOINT" \
+            docker compose version > /dev/null \
+            || { echo "::error::Plugin docker compose introuvable depuis la configuration du job."; exit 1; }
+          echo "Démon Docker joignable : $DOCKER_ENDPOINT"
 
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
@@ -94,20 +132,30 @@ jobs:
           TAG="${INPUT_TAG:-$RUN_SHA}"
           REF="${REGISTRY}/${IMAGE_NAME}:${TAG}"
           docker pull --quiet "$REF"
-          DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "$REF")"
+          # `RepoDigests` liste TOUS les dépôts connus pour ces couches : sur le
+          # runner qui a aussi servi aux builds locaux, l'index 0 peut être un
+          # nom local (`shopflow@sha256:...`), sans registre — le déploiement
+          # tirerait alors une image introuvable. On sélectionne explicitement
+          # l'entrée de NOTRE dépôt et on n'en garde que le digest.
+          DIGEST="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$REF" \
+            | grep "^${IMAGE_NAME}@" | head -n1 | cut -d@ -f2)"
+          case "$DIGEST" in
+            sha256:*) ;;
+            *) echo "::error::Digest introuvable pour ${IMAGE_NAME} (tag $TAG)."; exit 1 ;;
+          esac
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "image=$DIGEST" >> "$GITHUB_OUTPUT"
-          echo "Image résolue : $DIGEST"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Image résolue : ${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
 
       - name: Vérification Cosign (identité OIDC du workflow de build)
         env:
-          IMAGE: ${{ steps.resolve.outputs.image }}
+          DIGEST: ${{ steps.resolve.outputs.digest }}
           REPO: ${{ github.repository }}
         run: |
           cosign verify \
             --certificate-identity-regexp "^https://github.com/${REPO}/.github/workflows/ci.yml@refs/heads/main$" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            "$IMAGE"
+            "${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
 
   # ---------------------------------------------------------------------------
   # Staging — déploiement automatique sur le Docker local, port 8081.
@@ -134,21 +182,55 @@ jobs:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
+          # Le point de terminaison du démon est résolu AVANT de basculer sur la
+          # configuration isolée : `currentContext` (ici `desktop-linux`) vit dans
+          # ~/.docker/config.json. Une configuration neuve ne le contient pas, le
+          # CLI retombe donc sur le contexte `default` — unix:///var/run/docker.sock,
+          # socket que Docker Desktop ne crée que si l'option « default Docker
+          # socket » est active. D'où le « Cannot connect to the Docker daemon ».
+          # On fige explicitement DOCKER_HOST : l'isolation des identifiants ne
+          # doit pas emporter avec elle l'adresse du démon.
+          DOCKER_ENDPOINT="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2> /dev/null || true)"
+          if [ -z "$DOCKER_ENDPOINT" ]; then
+            for SOCK in "$HOME/.docker/run/docker.sock" /var/run/docker.sock; do
+              if [ -S "$SOCK" ]; then DOCKER_ENDPOINT="unix://$SOCK"; break; fi
+            done
+          fi
+          [ -n "$DOCKER_ENDPOINT" ] || { echo "::error::Démon Docker introuvable sur le runner."; exit 1; }
+          echo "DOCKER_HOST=$DOCKER_ENDPOINT" >> "$GITHUB_ENV"
+
           mkdir -p "$RUNNER_TEMP/docker"
           echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
           AUTH="$(printf '%s:%s' "$DOCKERHUB_USERNAME" "$DOCKERHUB_TOKEN" | base64 | tr -d '\n')"
           umask 077
-          printf '{"auths":{"https://index.docker.io/v1/":{"auth":"%s"}}}\n' "$AUTH" \
-            > "$RUNNER_TEMP/docker/config.json"
+          # `docker compose` est un PLUGIN CLI, cherché dans
+          # $DOCKER_CONFIG/cli-plugins avant les emplacements système. Une
+          # configuration neuve ne voit donc plus ~/.docker/cli-plugins et
+          # `docker compose` disparaît (« unknown command »). `cliPluginsExtraDirs`
+          # rend les plugins de la machine visibles sans réintroduire le trousseau.
+          printf '{"auths":{"https://index.docker.io/v1/":{"auth":"%s"}},"cliPluginsExtraDirs":["%s"]}\n' \
+            "$AUTH" "$HOME/.docker/cli-plugins" > "$RUNNER_TEMP/docker/config.json"
+
+          # Échouer ici, avec un message clair, plutôt que trois étapes plus loin
+          # sur un `docker pull` dont l'erreur ne dit pas d'où vient le problème.
+          DOCKER_CONFIG="$RUNNER_TEMP/docker" DOCKER_HOST="$DOCKER_ENDPOINT" \
+            docker version --format '{{.Server.Version}}' > /dev/null \
+            || { echo "::error::Démon Docker injoignable sur $DOCKER_ENDPOINT."; exit 1; }
+          DOCKER_CONFIG="$RUNNER_TEMP/docker" DOCKER_HOST="$DOCKER_ENDPOINT" \
+            docker compose version > /dev/null \
+            || { echo "::error::Plugin docker compose introuvable depuis la configuration du job."; exit 1; }
+          echo "Démon Docker joignable : $DOCKER_ENDPOINT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Déploiement
         env:
-          IMAGE: ${{ needs.verify-artifact.outputs.image }}
+          DIGEST: ${{ needs.verify-artifact.outputs.digest }}
           VERSION: ${{ needs.verify-artifact.outputs.tag }}
           APP_OTEL_EXPORTER_URL: http://127.0.0.1:4318/v1/traces
-        run: ./scripts/deploy-local.sh staging "$IMAGE" "$STAGING_PORT" "$VERSION"
+        run: |
+          ./scripts/deploy-local.sh staging \
+            "${REGISTRY}/${IMAGE_NAME}@${DIGEST}" "$STAGING_PORT" "$VERSION"
 
       - name: Tests de fumée
         run: |
@@ -195,35 +277,80 @@ jobs:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
+          # Le point de terminaison du démon est résolu AVANT de basculer sur la
+          # configuration isolée : `currentContext` (ici `desktop-linux`) vit dans
+          # ~/.docker/config.json. Une configuration neuve ne le contient pas, le
+          # CLI retombe donc sur le contexte `default` — unix:///var/run/docker.sock,
+          # socket que Docker Desktop ne crée que si l'option « default Docker
+          # socket » est active. D'où le « Cannot connect to the Docker daemon ».
+          # On fige explicitement DOCKER_HOST : l'isolation des identifiants ne
+          # doit pas emporter avec elle l'adresse du démon.
+          DOCKER_ENDPOINT="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2> /dev/null || true)"
+          if [ -z "$DOCKER_ENDPOINT" ]; then
+            for SOCK in "$HOME/.docker/run/docker.sock" /var/run/docker.sock; do
+              if [ -S "$SOCK" ]; then DOCKER_ENDPOINT="unix://$SOCK"; break; fi
+            done
+          fi
+          [ -n "$DOCKER_ENDPOINT" ] || { echo "::error::Démon Docker introuvable sur le runner."; exit 1; }
+          echo "DOCKER_HOST=$DOCKER_ENDPOINT" >> "$GITHUB_ENV"
+
           mkdir -p "$RUNNER_TEMP/docker"
           echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
           AUTH="$(printf '%s:%s' "$DOCKERHUB_USERNAME" "$DOCKERHUB_TOKEN" | base64 | tr -d '\n')"
           umask 077
-          printf '{"auths":{"https://index.docker.io/v1/":{"auth":"%s"}}}\n' "$AUTH" \
-            > "$RUNNER_TEMP/docker/config.json"
+          # `docker compose` est un PLUGIN CLI, cherché dans
+          # $DOCKER_CONFIG/cli-plugins avant les emplacements système. Une
+          # configuration neuve ne voit donc plus ~/.docker/cli-plugins et
+          # `docker compose` disparaît (« unknown command »). `cliPluginsExtraDirs`
+          # rend les plugins de la machine visibles sans réintroduire le trousseau.
+          printf '{"auths":{"https://index.docker.io/v1/":{"auth":"%s"}},"cliPluginsExtraDirs":["%s"]}\n' \
+            "$AUTH" "$HOME/.docker/cli-plugins" > "$RUNNER_TEMP/docker/config.json"
+
+          # Échouer ici, avec un message clair, plutôt que trois étapes plus loin
+          # sur un `docker pull` dont l'erreur ne dit pas d'où vient le problème.
+          DOCKER_CONFIG="$RUNNER_TEMP/docker" DOCKER_HOST="$DOCKER_ENDPOINT" \
+            docker version --format '{{.Server.Version}}' > /dev/null \
+            || { echo "::error::Démon Docker injoignable sur $DOCKER_ENDPOINT."; exit 1; }
+          DOCKER_CONFIG="$RUNNER_TEMP/docker" DOCKER_HOST="$DOCKER_ENDPOINT" \
+            docker compose version > /dev/null \
+            || { echo "::error::Plugin docker compose introuvable depuis la configuration du job."; exit 1; }
+          echo "Démon Docker joignable : $DOCKER_ENDPOINT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Démarrage du canari
         env:
-          IMAGE: ${{ needs.verify-artifact.outputs.image }}
+          DIGEST: ${{ needs.verify-artifact.outputs.digest }}
           VERSION: ${{ needs.verify-artifact.outputs.tag }}
           APP_OTEL_EXPORTER_URL: http://127.0.0.1:4318/v1/traces
-        run: ./scripts/deploy-local.sh canary "$IMAGE" "$CANARY_PORT" "$VERSION"
+        run: |
+          ./scripts/deploy-local.sh canary \
+            "${REGISTRY}/${IMAGE_NAME}@${DIGEST}" "$CANARY_PORT" "$VERSION"
 
       - name: Observation du canari
         run: ./scripts/canary-check.sh "http://127.0.0.1:${CANARY_PORT}" 0.02 60
 
       - name: Promotion à 100 %
         env:
-          IMAGE: ${{ needs.verify-artifact.outputs.image }}
+          DIGEST: ${{ needs.verify-artifact.outputs.digest }}
           VERSION: ${{ needs.verify-artifact.outputs.tag }}
           APP_OTEL_EXPORTER_URL: http://127.0.0.1:4318/v1/traces
-        run: ./scripts/deploy-local.sh production "$IMAGE" "$PRODUCTION_PORT" "$VERSION"
+        run: |
+          ./scripts/deploy-local.sh production \
+            "${REGISTRY}/${IMAGE_NAME}@${DIGEST}" "$PRODUCTION_PORT" "$VERSION"
 
       - name: Arrêt du canari
         if: always()
-        run: docker compose -p shopflow-canary -f deploy/compose/docker-compose.deploy.yml down || true
+        # `down` interpole le fichier compose exactement comme `up` : sans les
+        # variables requises il s'arrête sur « SHOPFLOW_IMAGE est requis », et le
+        # `|| true` d'origine avalait cet échec — le canari survivait donc à
+        # chaque déploiement, port 18082 occupé jusqu'au prochain redémarrage.
+        # SHOPFLOW_IMAGE n'est pas utilisée par `down` : elle doit seulement être
+        # définie pour que l'interpolation aboutisse.
+        run: |
+          SHOPFLOW_IMAGE=inutilisee-pour-down APP_ENVIRONMENT=canary HOST_PORT="$CANARY_PORT" \
+            docker compose -p shopflow-canary -f deploy/compose/docker-compose.deploy.yml down \
+            || echo "::warning::Arrêt du canari incomplet — vérifier le port ${CANARY_PORT}."
 
       - name: Retour arrière automatique en cas d'échec
         if: failure()
